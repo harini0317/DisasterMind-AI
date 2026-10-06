@@ -1,1 +1,164 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DisasterMind AI</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{--bg:#eef1f4;--card:#fff;--ink:#14263a;--mute:#5d6b7a;--line:#d5dbe1;--navy:#14263a;--accent:#0b6e8a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
+header{background:var(--navy);color:#fff;padding:14px 22px}
+header h1{margin:0;font-size:19px;font-weight:600}
+header p{margin:2px 0 0;font-size:13px;color:#b8c6d4}
+main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:16px;padding:16px 22px;max-width:1400px;margin:auto}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px}
+.card h2{margin:0 0 10px;font-size:15px}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+select,button{font:inherit;padding:7px 10px;border-radius:6px;border:1px solid var(--line);background:#fff;color:var(--ink)}
+button{cursor:pointer;background:var(--navy);color:#fff;border-color:var(--navy)}
+button.alt{background:#fff;color:var(--navy)}
+button.live{background:var(--accent);border-color:var(--accent)}
+button:disabled{opacity:.5;cursor:wait}
+button:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.step{border-left:4px solid var(--line);padding:4px 0 4px 10px;margin-bottom:8px}
+.step.on{border-color:var(--accent)}
+.step b{display:block;font-size:14px}
+.step span{color:var(--mute);font-size:13px;word-break:break-word}
+#map{height:380px;border-radius:6px}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;color:#fff;font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--line)}
+.logbox{max-height:300px;overflow:auto}
+.metrics{display:flex;flex-wrap:wrap;gap:8px 18px;font-size:14px}
+#msg{margin-top:8px;font-size:13px;color:#a32a1f}
+.full{grid-column:1/-1}
+</style>
+</head>
+<body>
+<header>
+  <h1>DisasterMind AI: Multi-Agent Disaster Monitoring and Emergency Response</h1>
+  <p>Tamil Nadu districts. Live scan uses real weather, river and seismic data with rule-based scoring. Simulated mode uses synthetic data.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Run agents</h2>
+    <div class="controls">
+      <select id="region" aria-label="District"></select>
+      <select id="hazard" aria-label="Hazard"></select>
+      <button id="runBtn" class="alt">Run agents (simulated)</button>
+      <button id="simAllBtn" class="alt">Scan all (simulated)</button>
+      <button id="liveBtn" class="live">Live scan: all districts</button>
+    </div>
+    <div id="msg"></div>
+    <h2 style="margin-top:14px">Agent pipeline</h2>
+    <div class="step" id="s1"><b>Perception agent</b><span>Waiting for a run.</span></div>
+    <div class="step" id="s2"><b>Prediction agent</b><span>Waiting for a run.</span></div>
+    <div class="step" id="s3"><b>Coordination agent</b><span>Waiting for a run.</span></div>
+    <div class="step" id="s4"><b>Response agent</b><span>Waiting for a run.</span></div>
+  </section>
+  <section class="card">
+    <h2>District map</h2>
+    <div id="map"></div>
+  </section>
+  <section class="card full">
+    <h2>Model test results (held-out simulated data, not live accuracy)</h2>
+    <div class="metrics" id="metrics">Loading...</div>
+  </section>
+  <section class="card full">
+    <h2>Event log</h2>
+    <div class="logbox"><table>
+      <thead><tr><th>Time</th><th>District</th><th>Hazard</th><th>Confidence</th><th>Risk</th><th>Alert</th><th>Source</th></tr></thead>
+      <tbody id="log"></tbody>
+    </table></div>
+  </section>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const COLORS={"NO ALERT":"#2e8b57","LOW":"#c9a400","MEDIUM":"#e07b00","HIGH":"#d1382b","CRITICAL":"#7a1020"};
+const $=id=>document.getElementById(id);
+const map=L.map("map").setView([10.9,78.4],7);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{attribution:"&copy; OpenStreetMap",maxZoom:18}).addTo(map);
+const markers={};
+
+async function api(path,method="GET"){
+  const r=await fetch(path,{method});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.error||j.detail||("HTTP "+r.status));
+  return j;
+}
+function msg(t){$("msg").textContent=t||""}
+function busy(on){["runBtn","simAllBtn","liveBtn"].forEach(i=>$(i).disabled=on)}
+
+function setMarker(r){
+  const c=COLORS[r.coordination.alert_level]||"#2e8b57";
+  if(markers[r.region]) map.removeLayer(markers[r.region]);
+  markers[r.region]=L.circleMarker([r.lat,r.lon],{radius:11,color:"#fff",weight:2,fillColor:c,fillOpacity:.95})
+    .addTo(map).bindPopup(`<b>${r.region}</b><br>${r.prediction.hazard}, risk ${r.prediction.risk_score}<br>${r.coordination.alert_level}`);
+}
+const confTxt=r=>r.prediction.confidence==null?"rule-based":r.prediction.confidence+"%";
+function step(id,html){const e=$(id);e.classList.add("on");e.querySelector("span").innerHTML=html}
+function showPipeline(r){
+  const p=r.perception,s=r.prediction,c=r.coordination,o=r.response;
+  const readings=Object.entries(p.sensor_readings||{}).map(([k,v])=>`${k}: ${v===null?"missing":v}`).join(", ");
+  step("s1",`${p.region}: ${p.sources.join(", ")}.<br>${readings}<br>Missing values fixed: ${p.missing_values_fixed}`);
+  step("s2",`${s.hazard} (${confTxt(r)}), risk score ${s.risk_score}`);
+  const res=Object.entries(c.resources).map(([k,v])=>`${k} x${v}`).join(", ")||"none";
+  step("s3",`Alert ${c.alert_level}, priority ${c.priority}.<br>Resources: ${res}`);
+  step("s4",`${o.actions.join("<br>")}<br><i>${o.notification}</i>`);
+}
+function addLog(r){
+  const tr=document.createElement("tr");
+  const c=COLORS[r.coordination.alert_level]||"#2e8b57";
+  const src=r.simulated_hazard==="LIVE DATA"?"Live":"Simulated";
+  tr.innerHTML=`<td>${r.time}</td><td>${r.region}</td><td>${r.prediction.hazard}</td><td>${confTxt(r)}</td><td>${r.prediction.risk_score}</td><td><span class="badge" style="background:${c}">${r.coordination.alert_level}</span></td><td>${src}</td>`;
+  $("log").prepend(tr);
+  while($("log").children.length>150) $("log").lastChild.remove();
+}
+function show(r){setMarker(r);addLog(r)}
+
+async function runOne(){
+  busy(true);msg("");
+  try{
+    const res=await fetch("/api/simulate",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({region:$("region").value,hazard:$("hazard").value})});
+    const r=await res.json(); if(!res.ok) throw new Error(r.error||"request failed");
+    show(r);showPipeline(r);
+  }catch(e){msg("Could not run agents: "+e.message)}
+  busy(false);
+}
+async function runAll(path,label){
+  busy(true);msg(label+"...");
+  try{
+    const list=await api(path,"POST");
+    list.slice().reverse().forEach(show);
+    showPipeline(list[0]);
+    msg(label+" done: "+list.length+" districts. Highest risk: "+list[0].region+" ("+list[0].prediction.hazard+", "+list[0].prediction.risk_score+").");
+  }catch(e){msg("Scan failed: "+e.message+(path.includes("live")&&/fetch|network|Failed/i.test(e.message)?" Check your internet connection.":""))}
+  busy(false);
+}
+
+$("runBtn").onclick=runOne;
+$("simAllBtn").onclick=()=>runAll("/api/simulate_all","Simulated scan");
+$("liveBtn").onclick=()=>runAll("/api/live_all","Live scan");
+
+(async function init(){
+  try{
+    const info=await api("/api/info");
+    $("region").innerHTML=Object.keys(info.regions).map(k=>`<option>${k}</option>`).join("");
+    $("hazard").innerHTML=["auto",...info.hazards].map(h=>`<option>${h}</option>`).join("");
+    Object.entries(info.regions).forEach(([k,v])=>{
+      markers[k]=L.circleMarker([v.lat,v.lon],{radius:9,color:"#fff",weight:2,fillColor:"#8a97a5",fillOpacity:.9}).addTo(map).bindPopup(k);
+    });
+  }catch(e){msg("Could not load districts: "+e.message)}
+  try{
+    const m=await api("/api/metrics");
+    $("metrics").innerHTML=m.accuracy?`<span>Accuracy: <b>${(m.accuracy*100).toFixed(1)}%</b></span><span>Precision: <b>${(m.precision*100).toFixed(1)}%</b></span><span>Recall: <b>${(m.recall*100).toFixed(1)}%</b></span><span>F1: <b>${(m.f1_score*100).toFixed(1)}%</b></span><span>Test samples: <b>${m.test_samples}</b></span>`:"No metrics file found.";
+  }catch(e){$("metrics").textContent="Metrics unavailable."}
+})();
+</script>
+</body>
+</html>
